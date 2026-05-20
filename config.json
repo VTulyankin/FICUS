@@ -1,0 +1,21 @@
+{
+    "include": [
+        "/etc",
+        "/bin",
+        "/sbin",
+        "/home"
+    ],
+    "exclude": [
+        "/tmp",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "mask:*.tmp",
+        "mask:*.cache",
+        "mask:*.log"
+    ],
+    "follow_symlinks": false,
+    "verbosity": "verbose",
+    "use_colors": true
+}
