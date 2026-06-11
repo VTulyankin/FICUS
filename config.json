@@ -1,4 +1,8 @@
 {
+    "database_path": "hash_database.json",
+    "report_path": "reports/report_%Y-%m-%d_%H-%M-%S.log",
+    "schedule": "",
+    "default_args": "scan full",
     "include": [
         "/etc",
         "/bin",
