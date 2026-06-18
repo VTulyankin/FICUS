@@ -9,6 +9,8 @@ import time
 
 
 class IntegrityChecker:
+    CRON_MARKER = "FICUS_CRON_MARKER"
+
     DEFAULT_CONFIG = {
         'database_path': 'hash_database.json',
         'report_path': 'reports/report_%Y-%m-%d_%H-%M-%S.log',
@@ -58,9 +60,10 @@ class IntegrityChecker:
         self.base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
         self.updated_db_path = None
 
-    def setup_config(self, config_path, use_default=False):
+    def setup_config(self, config_path, use_default=False, skip_default_log=False):
         if use_default:
-            self.log("Конфигурационный файл проигнорирован, используется конфигурация по умолчанию", level='info')
+            if not skip_default_log:
+                self.log("Конфигурационный файл проигнорирован, используется конфигурация по умолчанию", level='info')
             return
 
         if os.path.exists(config_path):
@@ -93,14 +96,12 @@ class IntegrityChecker:
 
         prefix = self.PREFIXES.get(level, f"[{level.upper()}]")
 
-        current_verbosity = self.config['verbosity']
-        allowed_levels = self.VERBOSITY_MAP.get(current_verbosity, [])
+        allowed_levels = self.VERBOSITY_MAP[self.config['verbosity']]
         use_colors = self.config.get('use_colors', True)
 
         for message in messages:
             if self.report_file_handler:
-                uncolored_line = f"{prefix} {message}".strip()
-                self.report_file_handler.write(uncolored_line + '\n')
+                self.report_file_handler.write(f"{prefix} {message}".strip() + '\n')
                 self.report_file_handler.flush()
 
             if level not in allowed_levels:
@@ -124,17 +125,15 @@ class IntegrityChecker:
             final_report_path = time.strftime(report_template)
         else:
             if report_arg.endswith('/') or report_arg.endswith('\\'):
-                filename_template = os.path.basename(report_template)
-                formatted_filename = time.strftime(filename_template)
-                final_report_path = os.path.join(report_arg, formatted_filename)
+                final_report_path = os.path.join(report_arg, time.strftime(os.path.basename(report_template)))
             else:
                 final_report_path = report_arg
 
         try:
-            if not os.path.isabs(final_report_path):
-                final_report_path = os.path.join(self.base_dir, final_report_path)
+            final_report_path = os.path.join(self.base_dir, final_report_path)
             report_dir = os.path.dirname(final_report_path)
-            os.makedirs(report_dir, exist_ok=True)
+            if report_dir and not os.path.exists(report_dir):
+                os.makedirs(report_dir, exist_ok=True)
             self.report_file_handler = open(final_report_path, 'w', encoding='utf-8')
         except (OSError, TypeError) as e:
             self.log(f"Не удалось создать файл отчета: {e}", level='error')
@@ -143,7 +142,7 @@ class IntegrityChecker:
     def report(self, stage, results=None, is_new_db=False):
         if stage == 'start':
             start_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            reason = "По расписанию (cron)" if os.environ.get("FICUS_CRON_MARKER") else "Ручной запуск"
+            reason = "По расписанию (cron)" if os.environ.get(self.CRON_MARKER) else "Ручной запуск"
             args_str = " ".join(sys.argv)
 
             header_lines = [
@@ -156,11 +155,7 @@ class IntegrityChecker:
             self.log(header_lines, level='report')
 
         elif stage == 'end':
-            file_results_header = [
-                "",
-                "РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ:"
-            ]
-            self.log(file_results_header, level='report')
+            self.log(["", "РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ:"], level='report')
 
             results_lines = []
             if is_new_db:
@@ -182,18 +177,6 @@ class IntegrityChecker:
 
             self.log(results_lines, level='result')
 
-            config_lines = [
-                "",
-                "ТЕКУЩАЯ КОНФИГУРАЦИЯ:"
-            ]
-            try:
-                config_str = json.dumps(self.config, indent=4, ensure_ascii=False)
-                config_lines.extend(config_str.splitlines())
-            except Exception as e:
-                config_lines.append(f"Ошибка форматирования конфигурации: {e}")
-
-            self.log(config_lines, level='report')
-
     def display_progress(self, iteration, total, prefix='', suffix='', length=20):
         if self.config['verbosity'] != 'verbose':
             return
@@ -208,28 +191,19 @@ class IntegrityChecker:
         endc = self.COLORS['endc'] if use_colors else ''
 
         if total > 0:
-            percent = "{0:.1f}".format(100 * (iteration / float(total)))
             filled_length = int(length * iteration // total)
-            bar_filled = '=' * filled_length
-            bar_unfilled = ' ' * (length - filled_length)
-            indicator = f"{bar_filled}{bar_unfilled}"
-            header = f" {prefix}: {percent}% ({iteration}/{total})"
+            indicator = f"{'=' * filled_length}{' ' * (length - filled_length)}"
+            header = f" {prefix}: {'{0:.1f}'.format(100 * (iteration / float(total)))}% ({iteration}/{total})"
         else:
-            spinner_chars = ['/', '-', '\\', '|']
-            indicator = spinner_chars[iteration % len(spinner_chars)]
+            indicator = ['/', '-', '\\', '|'][iteration % 4]
             header = f" {prefix}:"
 
-        colored_indicator = f"{color}[{indicator}]{endc}"
-
-        uncolored_len = len(f"[{indicator}]") + len(header)
-        max_suffix_len = terminal_width - uncolored_len - 2
+        max_suffix_len = terminal_width - (len(f"[{indicator}]") + len(header)) - 2
 
         if len(suffix) > max_suffix_len > 0:
             suffix = "..." + suffix[-max_suffix_len + 3:]
 
-        output_str = f'\r\033[2K{colored_indicator}{header} {suffix}'
-
-        sys.stdout.write(output_str)
+        sys.stdout.write(f'\r\033[2K{color}[{indicator}]{endc}{header} {suffix}')
         sys.stdout.flush()
 
     def clear_progress_line(self):
@@ -241,39 +215,45 @@ class IntegrityChecker:
         if len(sys.argv) == 1:
             sys.argv.extend(self.config['default_args'].split())
 
-        parser = argparse.ArgumentParser(description='WIP')
-
-        parser.add_argument('--default-config', action='store_true', help='WIP')
+        parser = argparse.ArgumentParser(description='Проверка целостности файлов.')
 
         verbosity_group = parser.add_mutually_exclusive_group()
         verbosity_group.add_argument('-v', '--verbose', action='store_const',
-                                     dest='verbosity', const='verbose', help='WIP')
+                                     dest='verbosity', const='verbose', help='Подробный вывод, включая прогресс и информационные сообщения')
         verbosity_group.add_argument('-q', '--quiet', action='store_const',
-                                     dest='verbosity', const='quiet', help='WIP')
+                                     dest='verbosity', const='quiet', help='Выводить только ошибки и результаты')
         verbosity_group.add_argument('-s', '--silent', action='store_const',
-                                     dest='verbosity', const='silent', help='WIP')
+                                     dest='verbosity', const='silent', help='Ничего не выводить в консоль (кроме ошибок)')
 
         subparsers = parser.add_subparsers(dest='command', required=True,
                                            help='Доступные команды')
 
-        parser_scan = subparsers.add_parser('scan', aliases=['s'], help='WIP')
-        scan_choices = self.SCAN_TYPE_HASH + self.SCAN_TYPE_PATHS + ['full']
-        parser_scan.add_argument('scan_type', nargs='?', choices=scan_choices,
-                                 default='full', help='WIP')
-        parser_scan.add_argument('-u', '--update', dest='update', action='store_true', help='WIP')
+        parser_scan = subparsers.add_parser('scan', aliases=['s'], help='Запуск сканирования файлов')
+        parser_scan.add_argument('scan_type', nargs='?', choices=self.SCAN_TYPE_HASH + self.SCAN_TYPE_PATHS + ['full'],
+                                 default='full', help='Тип сканирования: "paths" - только пути, "hashes" - только хеши, "full" - полный (по умолчанию)')
+        parser_scan.add_argument('-u', '--update', dest='update', action='store_true', help='Обновить базу данных при обнаружении изменений')
+        parser_scan.add_argument('--default-config', action='store_true', help='Использовать конфигурацию по умолчанию, игнорируя файл конфигурации')
 
-        subparsers.add_parser('config', help='WIP')
-        subparsers.add_parser('install-cron', help='WIP')
-        subparsers.add_parser('remove-cron', help='WIP')
+        parser_config = subparsers.add_parser('config', aliases=['с'], help='Управление конфигурацией')
+        parser_config.add_argument('--default-config', action='store_true', help='Использовать конфигурацию по умолчанию, игнорируя файл конфигурации')
+
+        parser_install = subparsers.add_parser('install-cron', help='Установить задачу в cron')
+        parser_remove = subparsers.add_parser('remove-cron', help='Удалить задачу из cron')
+
+        for p in [parser_scan, parser_config]:
+            for key, value in self.config.items():
+                if isinstance(value, list):
+                    p.add_argument(f'--{key}', nargs='+', help=f'Изменить список {key}')
+                else:
+                    p.add_argument(f'--{key}', help=f'Изменить параметр {key}')
 
         try:
-            args, unknown_args = parser.parse_known_args()
+            args = parser.parse_args()
             if hasattr(args, 'scan_type'):
                 if args.scan_type in self.SCAN_TYPE_PATHS:
                     args.scan_type = 'paths'
                 elif args.scan_type in self.SCAN_TYPE_HASH:
                     args.scan_type = 'hashes'
-            args.modifiers = unknown_args
             return args
         except SystemExit:
             print("[ERROR] Неверные аргументы командной строки", file=sys.stderr)
@@ -289,9 +269,8 @@ class IntegrityChecker:
                 if pattern.startswith('mask:'):
                     pattern = fnmatch.translate(pattern.split('mask:')[1])
                 else:
+                    pattern = os.path.abspath(os.path.join(self.base_dir, pattern))
                     pattern = re.escape(pattern)
-                    if not rule.startswith('/'):
-                        pattern = f".*{pattern}"
 
                 compiled.append(re.compile(f"^{pattern}$"))
 
@@ -307,47 +286,30 @@ class IntegrityChecker:
             self.log(f"Не удалось сохранить конфигурационный файл '{config_path}': {e}", level='error')
             raise
 
-    def apply_dynamic_config(self, modifiers):
-        if not modifiers:
-            return
-
-        current_key = None
-        list_action = None
-
-        for token in modifiers:
-            if token.startswith('--'):
-                key = token[2:]
-                if key in self.config:
-                    current_key = key
-                    list_action = None
-                    if type(self.config[current_key]) is str:
-                        self.config[current_key] = ""
-                else:
-                    self.log(f"Неизвестный параметр конфигурации: {key}", level='warn')
-                    current_key = None
-            elif current_key:
-                val_type = type(self.config[current_key])
-                if val_type is list:
-                    if token in ('add', 'remove'):
-                        list_action = token
-                    elif list_action == 'add':
-                        if token not in self.config[current_key]:
-                            self.config[current_key].append(token)
-                    elif list_action == 'remove':
-                        if token in self.config[current_key]:
-                            self.config[current_key].remove(token)
-                elif val_type is bool:
-                    self.config[current_key] = (token.lower() == 'true')
-                elif val_type is str:
-                    if self.config[current_key]:
-                        self.config[current_key] += f" {token}"
+    def update_config_from_args(self, args):
+        for key, default_value in self.config.items():
+            arg_value = getattr(args, key, None)
+            if arg_value is not None:
+                if isinstance(default_value, list):
+                    if arg_value and arg_value[0] == 'add':
+                        for v in arg_value[1:]:
+                            if v not in self.config[key]:
+                                self.config[key].append(v)
+                    elif arg_value and arg_value[0] == 'remove':
+                        for v in arg_value[1:]:
+                            if v in self.config[key]:
+                                self.config[key].remove(v)
                     else:
-                        self.config[current_key] = token
+                        self.config[key] = arg_value
+                elif isinstance(default_value, bool):
+                    self.config[key] = (str(arg_value).lower() == 'true')
+                elif isinstance(default_value, str):
+                    self.config[key] = arg_value
                 else:
                     try:
-                        self.config[current_key] = val_type(token)
+                        self.config[key] = type(default_value)(arg_value)
                     except ValueError:
-                        self.log(f"Неверный тип значения для {current_key}", level='warn')
+                        self.log(f"Неверный тип значения для {key}", level='warn')
 
     def install_cron(self):
         schedule = self.config.get('schedule', '').strip()
@@ -356,21 +318,18 @@ class IntegrityChecker:
             return
 
         script_path = os.path.abspath(sys.argv[0])
-        marker = "FICUS_CRON_MARKER=true"
-        cron_command = f"env {marker} flock -n /tmp/ficus.lock {sys.executable} {script_path} {self.config['default_args']}"
-        cron_job = f"{schedule} {cron_command}"
+        marker = f"{self.CRON_MARKER}=true"
+        cron_job = f"{schedule} env {marker} flock -n /tmp/ficus.lock {sys.executable} {script_path} {self.config['default_args']}"
 
         try:
             import subprocess
             result = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
-            current_cron = result.stdout if result.returncode == 0 else ""
 
-            lines = [line for line in current_cron.splitlines() if not (marker in line and script_path in line)]
+            lines = [line for line in (result.stdout if result.returncode == 0 else "").splitlines() if not (marker in line and script_path in line)]
             lines.append(cron_job)
 
-            new_cron = "\n".join(lines) + "\n"
             process = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE, text=True)
-            process.communicate(new_cron)
+            process.communicate("\n".join(lines) + "\n")
 
             if process.returncode == 0:
                 self.log(f"Задача успешно добавлена в cron:\n  {cron_job}", level='result')
@@ -381,7 +340,7 @@ class IntegrityChecker:
 
     def remove_cron(self):
         script_path = os.path.abspath(sys.argv[0])
-        marker = "FICUS_CRON_MARKER=true"
+        marker = f"{self.CRON_MARKER}=true"
         try:
             import subprocess
             result = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
@@ -389,18 +348,15 @@ class IntegrityChecker:
                 self.log("Crontab пуст или недоступен.", level='info')
                 return
 
-            current_cron = result.stdout
-            lines = current_cron.splitlines()
+            lines = result.stdout.splitlines()
             new_lines = [line for line in lines if not (marker in line and script_path in line)]
 
             if len(lines) == len(new_lines):
                 self.log("Задача не найдена в cron.", level='info')
                 return
 
-            new_cron = "\n".join(new_lines) + "\n" if new_lines else ""
-
             process = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE, text=True)
-            process.communicate(new_cron)
+            process.communicate("\n".join(new_lines) + "\n" if new_lines else "")
 
             if process.returncode == 0:
                 self.log("Задача успешно удалена из cron.", level='result')
@@ -414,14 +370,12 @@ class IntegrityChecker:
         spinner_count = 0
         follow_symlinks = self.config.get('follow_symlinks', False)
 
-        target_dirs_tuple = tuple(
-            os.path.abspath(p) + os.sep if not os.path.abspath(p).endswith(os.sep) else os.path.abspath(p)
-            for p in include_paths
-        )
-        exact_target_dirs = set(os.path.abspath(p) for p in include_paths)
+        resolved_include_paths = [os.path.abspath(os.path.join(self.base_dir, p)) for p in include_paths]
+        target_dirs_tuple = tuple(p + os.sep if not p.endswith(os.sep) else p for p in resolved_include_paths)
+        exact_target_dirs = set(resolved_include_paths)
 
         stack = []
-        roots_to_scan = set(include_paths)
+        roots_to_scan = set(resolved_include_paths)
 
         if include_rules:
             roots_to_scan.add('/')
@@ -517,6 +471,9 @@ class IntegrityChecker:
 
     def update_database(self, db_path, current_data):
         try:
+            db_dir = os.path.dirname(db_path)
+            if db_dir and not os.path.exists(db_dir):
+                os.makedirs(db_dir, exist_ok=True)
             with open(db_path, 'w', encoding='utf-8') as f:
                 json.dump(current_data, f, indent=4, sort_keys=True, ensure_ascii=False)
             self.updated_db_path = db_path
@@ -527,20 +484,22 @@ class IntegrityChecker:
         try:
             args = self.setup_parser()
             config_path = os.path.join(self.base_dir, 'config.json')
-            self.setup_config(config_path, args.default_config)
+            self.setup_config(config_path, getattr(args, 'default_config', False), skip_default_log=(args.command == 'config'))
 
             if args.verbosity is not None:
                 self.config['verbosity'] = args.verbosity
 
-            self.apply_dynamic_config(args.modifiers)
+            self.update_config_from_args(args)
 
             if self.config.get('report_path'):
                 self.setup_report(None)
 
             self.report(stage='start')
 
+            is_modified = any(getattr(args, key, None) is not None for key in self.config)
+
             if args.command == 'config':
-                if not args.modifiers:
+                if not is_modified and not getattr(args, 'default_config', False):
                     import subprocess
                     try:
                         subprocess.run(['nano', config_path])
@@ -549,15 +508,24 @@ class IntegrityChecker:
                         sys.exit(1)
                 else:
                     self.save_config(config_path)
-                    keys_modified = [arg[2:] for arg in args.modifiers if arg.startswith('--')]
-                    for key in keys_modified:
-                        if key in self.config:
-                            self.log(f"{key}: {self.config[key]} успешно сохранено в {config_path}", level='result')
+                    if getattr(args, 'default_config', False):
+                        self.log("Конфигурация сброшена до настроек по умолчанию.", level='result')
+                    
+                    updated_fields = []
+                    for key in self.config:
+                        if getattr(args, key, None) is not None:
+                            updated_fields.append(f"{key}: {self.config[key]}")
+                            
+                    if updated_fields:
+                        self.log("Обновленные параметры:", level='result')
+                        for field in updated_fields:
+                            self.log(f"  - {field}", level='result')
+                        self.log(f"Изменения сохранены в {config_path}", level='result')
+                    elif getattr(args, 'default_config', False):
+                        self.log(f"Настройки успешно сохранены в {config_path}", level='result')
                 sys.exit(0)
 
             if args.command == 'install-cron':
-                if args.modifiers:
-                    self.save_config(config_path)
                 self.install_cron()
                 sys.exit(0)
 
@@ -568,11 +536,7 @@ class IntegrityChecker:
             if args.command not in ['scan', 's']:
                 sys.exit(0)
 
-            db_path = self.config['database_path']
-            if not os.path.isabs(db_path):
-                args.db = os.path.join(self.base_dir, db_path)
-            else:
-                args.db = db_path
+            args.db = os.path.join(self.base_dir, self.config['database_path'])
 
             start_time = time.time()
             existing_data, success, is_new_db = self.setup_database(args.db)
@@ -585,10 +549,7 @@ class IntegrityChecker:
             report_data = {}
             new_db_data = existing_data.copy()
 
-            run_paths = args.scan_type in ('paths', 'full')
-            run_hashes = args.scan_type in ('hashes', 'full')
-
-            if run_paths:
+            if args.scan_type in ('paths', 'full'):
                 include_rules = self.compile_rules([r for r in self.config['include'] if r.startswith('mask:')])
                 exclude_rules = self.compile_rules(self.config['exclude'])
                 include_paths = [r for r in self.config['include'] if not r.startswith('mask:')]
@@ -611,9 +572,8 @@ class IntegrityChecker:
             else:
                 current_files = list(existing_data.keys())
 
-            if run_hashes:
-                files_to_hash = sorted(current_files)
-                hash_report, current_hashes = self.scan_hashes(files_to_hash, existing_data)
+            if args.scan_type in ('hashes', 'full'):
+                hash_report, current_hashes = self.scan_hashes(sorted(current_files), existing_data)
                 report_data.update(hash_report)
 
                 if args.update:
@@ -622,14 +582,11 @@ class IntegrityChecker:
             if args.update:
                 self.update_database(args.db, new_db_data)
 
-            elapsed_time = time.time() - start_time
-            stats_message = f"Статистика: обработано {len(current_files)} файлов за {elapsed_time:.2f} сек"
-            self.log(stats_message, level='info')
+            self.log(f"Статистика: обработано {len(current_files)} файлов за {time.time() - start_time:.2f} сек", level='info')
 
             self.report(stage='end', results=report_data, is_new_db=is_new_db)
 
-            exit_code = 1 if any(report_data.values()) and not is_new_db else 0
-            sys.exit(exit_code)
+            sys.exit(1 if any(report_data.values()) and not is_new_db else 0)
 
         except SystemExit as e:
             sys.exit(e.code)
