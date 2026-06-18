@@ -51,14 +51,79 @@ class IntegrityChecker:
         'silent': []
     }
 
-    SCAN_TYPE_HASH = ['h', 'hash', 'hashes']
-    SCAN_TYPE_PATHS = ['p', 'path', 'paths']
+    COMMANDS_INFO = {
+        'scan': {
+            'aliases': ['scan', 's'],
+            'help': 'Запуск сканирования файлов'
+        },
+        'paths': {
+            'aliases': ['paths', 'path', 'p'],
+            'help': 'Тип сканирования: только пути'
+        },
+        'hashes': {
+            'aliases': ['hashes', 'hash', 'h'],
+            'help': 'Тип сканирования: только хеши'
+        },
+        'full': {
+            'aliases': ['full', 'f'],
+            'help': 'Тип сканирования: полный (по умолчанию)'
+        },
+        'update': {
+            'aliases': ['--update', '-u'],
+            'help': 'Обновить базу данных при обнаружении изменений'
+        },
+        'default_config': {
+            'aliases': ['--default-config'],
+            'help': 'Использовать конфигурацию по умолчанию, игнорируя файл конфигурации'
+        },
+        'config': {
+            'aliases': ['config', 'c', 'с'],
+            'help': 'Управление конфигурацией'
+        },
+        'install-cron': {
+            'aliases': ['install-cron'],
+            'help': 'Установить задачу в cron'
+        },
+        'remove-cron': {
+            'aliases': ['remove-cron'],
+            'help': 'Удалить задачу из cron'
+        },
+        'verbose': {
+            'aliases': ['--verbose', '-v'],
+            'help': 'Подробный вывод, включая прогресс и информационные сообщения'
+        },
+        'quiet': {
+            'aliases': ['--quiet', '-q'],
+            'help': 'Выводить только ошибки и результаты'
+        },
+        'silent': {
+            'aliases': ['--silent', '-s'],
+            'help': 'Ничего не выводить в консоль (кроме ошибок)'
+        },
+        'help': {
+            'aliases': ['help', '-h', '--help'],
+            'help': 'Вывод справочной информации по командам и аргументам'
+        }
+    }
 
     def __init__(self):
         self.config = self.DEFAULT_CONFIG.copy()
         self.report_file_handler = None
         self.base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
         self.updated_db_path = None
+        
+        self.commands_info = self.COMMANDS_INFO.copy()
+        for key, value in self.DEFAULT_CONFIG.items():
+            if isinstance(value, list):
+                self.commands_info[key] = {
+                    'aliases': [f'--{key}'],
+                    'help': f'Изменить список {key}'
+                }
+            else:
+                self.commands_info[key] = {
+                    'aliases': [f'--{key}'],
+                    'help': f'Изменить параметр {key}'
+                }
 
     def setup_config(self, config_path, use_default=False, skip_default_log=False):
         if use_default:
@@ -211,53 +276,96 @@ class IntegrityChecker:
             sys.stdout.write('\r\033[2K')
             sys.stdout.flush()
 
+    def print_help(self, targets):
+        if not targets:
+            for key, info in self.commands_info.items():
+                aliases_str = ", ".join(info['aliases'])
+                print(f"{key} ({aliases_str}): {info['help']}")
+        else:
+            for target in targets:
+                found = False
+                for key, info in self.commands_info.items():
+                    if target == key or target in info['aliases']:
+                        aliases_str = ", ".join(info['aliases'])
+                        print(f"{key} ({aliases_str}): {info['help']}")
+                        found = True
+                        break
+                if not found:
+                    print(f"Неизвестный аргумент: {target}")
+
     def setup_parser(self):
-        if len(sys.argv) == 1:
-            sys.argv.extend(self.config['default_args'].split())
+        args_list = sys.argv[1:]
+        if not args_list:
+            args_list = self.config['default_args'].split()
 
-        parser = argparse.ArgumentParser(description='Проверка целостности файлов.')
+        class Args:
+            pass
 
-        verbosity_group = parser.add_mutually_exclusive_group()
-        verbosity_group.add_argument('-v', '--verbose', action='store_const',
-                                     dest='verbosity', const='verbose', help='Подробный вывод, включая прогресс и информационные сообщения')
-        verbosity_group.add_argument('-q', '--quiet', action='store_const',
-                                     dest='verbosity', const='quiet', help='Выводить только ошибки и результаты')
-        verbosity_group.add_argument('-s', '--silent', action='store_const',
-                                     dest='verbosity', const='silent', help='Ничего не выводить в консоль (кроме ошибок)')
+        parsed = Args()
+        parsed.command = None
+        parsed.scan_type = 'full'
+        parsed.update = False
+        parsed.default_config = False
+        parsed.verbosity = None
+        parsed.help_targets = []
+        for key in self.config:
+            setattr(parsed, key, None)
 
-        subparsers = parser.add_subparsers(dest='command', required=True,
-                                           help='Доступные команды')
+        i = 0
+        while i < len(args_list):
+            arg = args_list[i]
+            matched_key = None
+            for key, info in self.commands_info.items():
+                if arg in info['aliases']:
+                    matched_key = key
+                    break
 
-        parser_scan = subparsers.add_parser('scan', aliases=['s'], help='Запуск сканирования файлов')
-        parser_scan.add_argument('scan_type', nargs='?', choices=self.SCAN_TYPE_HASH + self.SCAN_TYPE_PATHS + ['full'],
-                                 default='full', help='Тип сканирования: "paths" - только пути, "hashes" - только хеши, "full" - полный (по умолчанию)')
-        parser_scan.add_argument('-u', '--update', dest='update', action='store_true', help='Обновить базу данных при обнаружении изменений')
-        parser_scan.add_argument('--default-config', action='store_true', help='Использовать конфигурацию по умолчанию, игнорируя файл конфигурации')
+            if not matched_key:
+                matched_key = arg
 
-        parser_config = subparsers.add_parser('config', aliases=['с'], help='Управление конфигурацией')
-        parser_config.add_argument('--default-config', action='store_true', help='Использовать конфигурацию по умолчанию, игнорируя файл конфигурации')
-
-        parser_install = subparsers.add_parser('install-cron', help='Установить задачу в cron')
-        parser_remove = subparsers.add_parser('remove-cron', help='Удалить задачу из cron')
-
-        for p in [parser_scan, parser_config]:
-            for key, value in self.config.items():
-                if isinstance(value, list):
-                    p.add_argument(f'--{key}', nargs='+', help=f'Изменить список {key}')
+            if matched_key == 'help':
+                parsed.command = 'help'
+                parsed.help_targets = args_list[i+1:]
+                return parsed
+            elif matched_key in ('scan', 'config', 'install-cron', 'remove-cron'):
+                if not parsed.command:
+                    parsed.command = matched_key
+            elif matched_key in ('paths', 'hashes', 'full'):
+                parsed.scan_type = matched_key
+            elif matched_key == 'update':
+                parsed.update = True
+            elif matched_key == 'default_config':
+                parsed.default_config = True
+            elif matched_key in ('verbose', 'quiet', 'silent'):
+                parsed.verbosity = matched_key
+            elif matched_key in self.config:
+                if isinstance(self.config[matched_key], list):
+                    val_list = []
+                    i += 1
+                    while i < len(args_list):
+                        next_arg = args_list[i]
+                        is_known = False
+                        for k, info in self.commands_info.items():
+                            if next_arg in info['aliases']:
+                                is_known = True
+                                break
+                        if is_known:
+                            i -= 1
+                            break
+                        val_list.append(next_arg)
+                        i += 1
+                    setattr(parsed, matched_key, val_list)
                 else:
-                    p.add_argument(f'--{key}', help=f'Изменить параметр {key}')
+                    if i + 1 < len(args_list):
+                        setattr(parsed, matched_key, args_list[i+1])
+                        i += 1
+            i += 1
 
-        try:
-            args = parser.parse_args()
-            if hasattr(args, 'scan_type'):
-                if args.scan_type in self.SCAN_TYPE_PATHS:
-                    args.scan_type = 'paths'
-                elif args.scan_type in self.SCAN_TYPE_HASH:
-                    args.scan_type = 'hashes'
-            return args
-        except SystemExit:
+        if not parsed.command:
             print("[ERROR] Неверные аргументы командной строки", file=sys.stderr)
             sys.exit(2)
+
+        return parsed
 
     def compile_rules(self, rules):
         compiled = []
@@ -483,6 +591,11 @@ class IntegrityChecker:
     def run(self):
         try:
             args = self.setup_parser()
+            
+            if args.command == 'help':
+                self.print_help(args.help_targets)
+                sys.exit(0)
+
             config_path = os.path.join(self.base_dir, 'config.json')
             self.setup_config(config_path, getattr(args, 'default_config', False), skip_default_log=(args.command == 'config'))
 
